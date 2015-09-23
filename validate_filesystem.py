@@ -3,6 +3,7 @@
 from __future__ import print_function, unicode_literals
 
 import argparse
+import datetime
 from email.mime.text import MIMEText
 import hashlib
 import getpass
@@ -16,11 +17,12 @@ import sys
 
 import memcrc
 
-checksum_filename = 'CHECKSUM'
+CHECKSUM_FILENAME = 'CHECKSUM'
 
 def parse_args():
     parser = argparse.ArgumentParser(description='Validate your filesystem')
     parser.add_argument('dirs', metavar="DIRNAME", nargs='+') 
+    parser.add_argument('--verbose', action='store_true', default=False)
     parser.add_argument('--clean', action='store_true', default=False) 
     parser.add_argument('--noemail', action='store_true', default=False) 
     parser.add_argument('--method', choices=('shell','python'), default='shell') 
@@ -62,7 +64,7 @@ def load_email_credentials():
 def send_email(config, subject, message):
     msg = MIMEText(message)
     msg['Subject'] = subject
-    msg['From'] = config['username']
+    msg['From'] = 'noreply@datahugs.org'
     msg['To'] = config['username']
 
     conn = smtplib.SMTP_SSL(config['server'])
@@ -71,146 +73,176 @@ def send_email(config, subject, message):
     conn.quit()
 
 
-class CRCchecker(object):
-    def __init__(self, method='shell'):
-        self.cwd = os.getcwd()
-        self.method = method
-        self.files = {}
+class Directory(object):
+    def __init__(self, path, filenames=None, method='shell',
+                 checksum_filename=CHECKSUM_FILENAME):
+        self.path = path
+        self.checksum_filename = checksum_filename
+        if filenames is None:
+            self.filenames = [name for name in os.listdir(path) 
+                              if not os.path.isdir(os.path.join(path, name))]
+        else:
+            self.filenames = filenames
 
-    @staticmethod
-    def _python_checksum(filenames):
-        results = {}
-        for filename in filenames:
-            checksums = {}
+        try:
+            self.filenames.remove(checksum_filename)
+        except ValueError:
+            pass
+
+        self.clear()
+
+    def _python_checksum(self):
+        self.checksums = {}
+        for filename in self.filenames:
+            result = {}
             filesize = os.path.getsize(filename)
-            checksums['size'] = str(filesize)
+            result['size'] = str(filesize)
             
             with open(filename, 'rb') as f:
                 data = mmap.mmap(f.fileno(), filesize, prot=mmap.PROT_READ)
                 file_crc32 = memcrc.memcrc(data)
-                checksums['crc32'] = file_crc32
+                result['crc32'] = file_crc32
 
-            results[filename] = checksums
+            self.checksums[filename] = result
 
-        return results
+    def _shell_checksum(self):
+        self.checksums = {}
+        if not self.filenames:
+            return
 
-    @staticmethod
-    def _shell_checksum(filenames):
-        command = ['cksum'] + filenames
+        command = ['cksum'] + self.filenames
         shell_output = sp.check_output(command)
 
-        results = {}
         for line in shell_output.splitlines():
             crc32, filesize, filename = line.split()
-            results[filename] = {'crc32': crc32, 'size': filesize}
+            self.checksums[filename] = {'crc32': crc32, 'size': filesize}
 
-        return results
+    def calculate_checksums(self, method='shell'):
+        self.clear()
+        if method == 'python':
+            self._python_checksum()
+        elif method == 'shell':
+            self._shell_checksum()
 
-    @staticmethod
-    def write_checksum_file(file_checksums):
-        with open(checksum_filename, 'w') as cf:
-            for filename, values in file_checksums.iteritems():
+    def clear(self):
+        self.checksums = {}
+        self.valid = []
+        self.invalid = []
+        self.new = []
+        self.missing = []
+
+    def read_checksum_file(self):
+        self.clear()
+        if os.path.exists(self.checksum_filename):
+            with open(self.checksum_filename) as f:
+                for line in f:
+                    crc32, size, filename = line.split()
+                    self.checksums[filename] = {'crc32': crc32, 'size': size}
+
+    def write_checksum_file(self):
+        with open(self.checksum_filename, 'w') as cf:
+            for filename, values in self.checksums.iteritems():
                  cf.write('{crc32} {size} {filename}\n'.format(filename=filename, **values))
 
-    @staticmethod
-    def read_checksums():
-        checksums = {}
-        with open(checksum_filename) as f:
-            for line in f:
-                crc32, size, filename = line.split()
-                checksums[filename] = {'crc32': crc32, 'size': size}
-        return checksums
-
-    def calculate_checksums(self, filenames):
-        if self.method == 'python':
-            result = self._python_checksum(filenames)
-        elif self.method == 'shell':
-            result = self._shell_checksum(filenames)
-        return result
-
-    def validate_directory(self, checksums):
-        valid = []
-        invalid = []
-        filenames = checksums.keys()
-        validation_checksums = self.calculate_checksums(filenames)
-
-        for filename, chksums in checksums.iteritems():
-            ok = True
-            test_chksums = validation_checksums[filename]
-            for name, cksum in chksums.iteritems():
-                if test_chksums[name] != cksum:
-                    ok = False
-                    break
-            if ok:
-                valid.append(filename)
+    def process(self):
+        self.read_checksum_file()
+        old_checksums = self.checksums
+        
+        self.calculate_checksums()
+        for filename in old_checksums:
+            if filename not in self.checksums:
+                self.missing.append(filename)
+        
+        for filename, checksums in self.checksums.iteritems():
+            if filename in old_checksums:
+                if checksums == old_checksums[filename]:
+                    self.valid.append(filename)
+                else:
+                    self.invalid.append(filename)
             else:
-                invalid.append((filename, chksums, test_chksums))
+                self.new.append(filename)
 
-        return valid, invalid
 
-    def process_directory(self, directory):
-        results = {}
+class Checker(object):
+    def __init__(self, method='shell'):
+        self.cwd = os.getcwd()
+        self.method = method
+        self.directories = {}
+
+    def process_directory(self, directory, verbose=False):
         for dirpath, _, filenames in os.walk(directory):
-            print(dirpath, filenames)
+            if verbose:
+                print(dirpath, filenames)
             if not filenames:
                 continue
 
             os.chdir(dirpath)
 
-            checksums = {}
-            valid_files, invalid_files, missing_files = [], [], []
-            if checksum_filename in filenames:
-                checksums = self.read_checksums()
-                filenames.remove(checksum_filename)
-                missing_files = [name for name in filenames if not os.path.exists(name)]
-                for filename in missing_files:
-                    del checksums[filename]
-                valid_files, invalid_files = self.validate_directory(checksums)
+            d = Directory(dirpath, filenames=filenames, method=self.method)
+            d.process()
 
-            new_files = [name for name in filenames if name not in checksums]
+            if verbose:
+                print(dirpath)
+                print('valid: {}'.format(d.valid))
+                print('invalid: {}'.format(d.invalid))
+                print('new: {}'.format(d.new))
+                print('missing: {}'.format(d.missing))
 
-            results[dirpath] = (len(new_files), len(valid_files), missing_files, invalid_files)
+            if d.new and not (d.invalid or d.missing):
+                d.write_checksum_file()
 
-            if not invalid_files and new_files:
-                new_checksums = self.calculate_checksums(dirpath, new_files)
-                checksums.update(new_checksums)
-                write_checksum_file(checksums)
+            self.directories[dirpath] = d
 
             os.chdir(self.cwd)
 
-        return results
+    @property
+    def valid(self):
+        for dirpath, d in self.directories.iteritems():
+            for filename in d.valid:
+                yield os.path.join(dirpath, filename)
+
+    @property
+    def invalid(self):
+        for dirpath, d in self.directories.iteritems():
+            for filename in d.invalid:
+                yield os.path.join(dirpath, filename)
+
+    @property
+    def new(self):
+        for dirpath, d in self.directories.iteritems():
+            for filename in d.new:
+                yield os.path.join(dirpath, filename)
+
+    @property
+    def missing(self):
+        for dirpath, d in self.directories.iteritems():
+            for filename in d.missing:
+                yield os.path.join(dirpath, filename)
 
 
 def clean_directory(directory):
     for dirpath, _, filenames in os.walk(directory):
-        if checksum_filename in filenames:
-            os.remove(os.path.join(dirpath, checksum_filename))
+        if CHECKSUM_FILENAME in filenames:
+            os.remove(os.path.join(dirpath, CHECKSUM_FILENAME))
 
 
 def report_results(checker):
-    valid, new = 0, 0
-    missing = []
-    invalid = []
-    for dirpath, filestatuses in results.iteritems():
-        new += filestatuses[0]
-        valid += filestatuses[1]
-# TODO concat dirpath & filenames
-        missing.extend(filestatuses[2])
-        invalid.extend(filestatuses[3])
-    
+
+    new = list(checker.new)
+    missing = list(checker.missing)
+    invalid = list(checker.invalid)
+
     email_config = load_email_credentials()
-
-    result = [
-        "valid: {}".format(valid),
-        "new: {}".format(new),
-        "missing: {}".format(missing),
-        "invalid: {}".format(invalid),
-    ]
-
-    if any([new, missing, invalid]):
-        subject = 'Datahugs report: {date} {problem}'.format(date=date, problem=problem)
-        send_email(email_config, subject, '\n'.join(result))
-
+    date = datetime.date.today()
+    if new:
+        subject = 'Datahugs report: New files {date} '.format(date=date)
+        send_email(email_config, subject, '\n'.join(new))
+    if missing:
+        subject = 'Datahugs report: Missing files {date} '.format(date=date)
+        send_email(email_config, subject, '\n'.join(missing))
+    if invalid:
+        subject = 'Datahugs report: Invalid file checksums {date} '.format(date=date)
+        send_email(email_config, subject, '\n'.join(invalid))
 
 def main():
     args = parse_args()
@@ -219,11 +251,22 @@ def main():
         for directory in args.dirs:
             clean_directory(directory)
     else:
-        checker = CRCchecker(args.method)
+        checker = Checker(args.method)
         for directory in args.dirs:
-            checker.process_directory(directory)
+            checker.process_directory(directory, verbose=args.verbose)
+
         if not args.noemail:
             report_results(checker)
+
+        if args.verbose:
+            for item in checker.valid:
+                print('Valid: {}'.format(item))
+            for item in checker.invalid:
+                print('Invalid: {}'.format(item))
+            for item in checker.new:
+                print('New: {}'.format(item))
+            for item in checker.missing:
+                print('Missing: {}'.format(item))
 
     sys.exit(0)
 
