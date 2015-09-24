@@ -34,7 +34,7 @@ def request_email_credentials():
     config = {}
 
     server = raw_input('Input email server address: ')
-    conn = smtplib.SMTP_SSL(address)
+    conn = smtplib.SMTP_SSL(server)
     config['server'] = server
     
     username = raw_input('Username: ')
@@ -114,7 +114,7 @@ class Directory(object):
         shell_output = sp.check_output(command)
 
         for line in shell_output.splitlines():
-            crc32, filesize, filename = line.split()
+            crc32, filesize, filename = line.split(None, 2)
             self.checksums[filename] = {'crc32': crc32, 'size': filesize}
 
     def calculate_checksums(self, method='shell'):
@@ -233,15 +233,15 @@ def report_results(checker):
     invalid = list(checker.invalid)
 
     email_config = load_email_credentials()
-    date = datetime.date.today()
+    date = str(datetime.date.today())
     if new:
-        subject = 'Datahugs report: New files {date} '.format(date=date)
+        subject = 'Datahugs report: {} new files {} '.format(len(new), date)
         send_email(email_config, subject, '\n'.join(new))
     if missing:
-        subject = 'Datahugs report: Missing files {date} '.format(date=date)
+        subject = 'Datahugs report: {} missing files {} '.format(len(missing), date)
         send_email(email_config, subject, '\n'.join(missing))
     if invalid:
-        subject = 'Datahugs report: Invalid file checksums {date} '.format(date=date)
+        subject = 'Datahugs report: {} invalid file checksums {} '.format(len(invalid), date)
         send_email(email_config, subject, '\n'.join(invalid))
 
 def main():
