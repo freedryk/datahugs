@@ -247,18 +247,25 @@ def report_results(checker):
 def main():
     args = parse_args()
 
+    # Check for email credentials
+    if not args.noemail:
+       load_email_credentials()
+
     if args.clean:
+        # delete all checksum files
         for directory in args.dirs:
             clean_directory(directory)
     else:
+        # Calculate checksums and check against previous checksum files
         checker = Checker(args.method)
         for directory in args.dirs:
             checker.process_directory(directory, verbose=args.verbose)
 
+        # Email Result
         if not args.noemail:
             report_results(checker)
 
-        if args.verbose:
+        if args.verbose or args.noemail:
             for item in checker.valid:
                 print('Valid: {}'.format(item))
             for item in checker.invalid:
