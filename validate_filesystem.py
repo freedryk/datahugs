@@ -93,7 +93,6 @@ class Directory(object):
             self.filenames = filenames
         self.filenames = [name for name in self.filenames if name not in exclude_files]
 
-
         self.clear()
 
     def _python_checksum(self):
@@ -103,7 +102,7 @@ class Directory(object):
             filesize = os.path.getsize(filename)
             result['size'] = str(filesize)
             
-            with open(filename, 'rb') as f:
+            with open(os.path.join(self.path, filename), 'rb') as f:
                 data = mmap.mmap(f.fileno(), filesize, prot=mmap.PROT_READ)
                 file_crc32 = memcrc.memcrc(data)
                 result['crc32'] = file_crc32
@@ -116,7 +115,7 @@ class Directory(object):
             return
 
         command = ['cksum'] + self.filenames
-        shell_output = sp.check_output(command)
+        shell_output = sp.check_output(command, cwd=self.path)
 
         for line in shell_output.splitlines():
             crc32, filesize, filename = line.split(None, 2)
@@ -138,14 +137,15 @@ class Directory(object):
 
     def read_checksum_file(self):
         self.clear()
-        if os.path.exists(self.checksum_filename):
-            with open(self.checksum_filename, 'r') as f:
+        checksum_full_path = os.path.join(self.path, self.checksum_filename)
+        if os.path.exists(checksum_full_path):
+            with open(checksum_full_path, 'r') as f:
                 for line in f:
-                    crc32, size, filename = line.split(None, 2)
+                    crc32, size, filename = line.strip().split(None, 2)
                     self.checksums[filename] = {'crc32': crc32, 'size': size}
 
     def write_checksum_file(self):
-        with open(self.checksum_filename, 'w') as cf:
+        with open(os.path.join(self.path, self.checksum_filename), 'w') as cf:
             for filename, values in self.checksums.iteritems():
                  cf.write('{crc32} {size} {filename}\n'.format(filename=filename, **values))
 
@@ -176,12 +176,8 @@ class Checker(object):
 
     def process_directory(self, directory, verbose=False):
         for dirpath, _, filenames in os.walk(directory):
-            if verbose:
-                print(dirpath, filenames)
             if not filenames:
                 continue
-
-            os.chdir(dirpath)
 
             d = Directory(dirpath, filenames=filenames, method=self.method)
             d.process()
@@ -192,13 +188,12 @@ class Checker(object):
                 print('invalid: {}'.format(d.invalid))
                 print('new: {}'.format(d.new))
                 print('missing: {}'.format(d.missing))
+                print()
 
             if d.new and not (d.invalid or d.missing):
                 d.write_checksum_file()
 
             self.directories[dirpath] = d
-
-            os.chdir(self.cwd)
 
     @property
     def valid(self):
