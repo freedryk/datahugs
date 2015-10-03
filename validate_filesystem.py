@@ -1,8 +1,9 @@
 #!/usr/bin/env python
 
-from __future__ import print_function, unicode_literals
+from __future__ import print_function
 
 import argparse
+import codecs
 import datetime
 from email.mime.text import MIMEText
 import hashlib
@@ -18,6 +19,13 @@ import sys
 import memcrc
 
 CHECKSUM_FILENAME = 'CHECKSUM'
+
+exclude_files = (
+    CHECKSUM_FILENAME,
+    '.DS_Store',
+    '.apdisk',
+    'Thumbs.db',
+)
 
 def parse_args():
     parser = argparse.ArgumentParser(description='Validate your filesystem')
@@ -58,7 +66,7 @@ def load_email_credentials():
     if not os.path.exists(config_path):
         request_email_credentials()
     
-    return json.load(open(config_path))
+    return json.load(open(config_path, 'r'))
 
 
 def send_email(config, subject, message):
@@ -83,11 +91,8 @@ class Directory(object):
                               if not os.path.isdir(os.path.join(path, name))]
         else:
             self.filenames = filenames
+        self.filenames = [name for name in self.filenames if name not in exclude_files]
 
-        try:
-            self.filenames.remove(checksum_filename)
-        except ValueError:
-            pass
 
         self.clear()
 
@@ -134,9 +139,9 @@ class Directory(object):
     def read_checksum_file(self):
         self.clear()
         if os.path.exists(self.checksum_filename):
-            with open(self.checksum_filename) as f:
+            with open(self.checksum_filename, 'r') as f:
                 for line in f:
-                    crc32, size, filename = line.split()
+                    crc32, size, filename = line.split(None, 2)
                     self.checksums[filename] = {'crc32': crc32, 'size': size}
 
     def write_checksum_file(self):
