@@ -6,6 +6,7 @@ import argparse
 import codecs
 import datetime
 from email.mime.text import MIMEText
+import fnmatch
 import hashlib
 import getpass
 import json
@@ -20,13 +21,6 @@ import memcrc
 
 CHECKSUM_FILENAME = 'CHECKSUM'
 
-exclude_files = (
-    CHECKSUM_FILENAME,
-    '.DS_Store',
-    '.apdisk',
-    'Thumbs.db',
-)
-
 def parse_args():
     parser = argparse.ArgumentParser(description='Validate your filesystem')
     parser.add_argument('dirs', metavar="DIRNAME", nargs='+') 
@@ -34,6 +28,8 @@ def parse_args():
     parser.add_argument('--clean', action='store_true', default=False) 
     parser.add_argument('--noemail', action='store_true', default=False) 
     parser.add_argument('--method', choices=('shell','python'), default='shell') 
+    parser.add_argument('--excludefile') 
+    parser.add_argument('--exclude', nargs='*')
 
     return parser.parse_args()
 
@@ -82,18 +78,25 @@ def send_email(config, subject, message):
 
 
 class Directory(object):
-    def __init__(self, path, filenames=None, method='shell',
+    def __init__(self, path, method='shell',
+                 exclude_files=[CHECKSUM_FILENAME],
                  checksum_filename=CHECKSUM_FILENAME):
         self.path = path
         self.checksum_filename = checksum_filename
-        if filenames is None:
-            self.filenames = [name for name in os.listdir(path) 
-                              if not os.path.isdir(os.path.join(path, name))]
-        else:
-            self.filenames = filenames
-        self.filenames = [name for name in self.filenames if name not in exclude_files]
+        self.exclude_files = exclude_files
+        self.filenames = [name for name in os.listdir(path) 
+                          if not (os.path.isdir(os.path.join(path, name))
+                                  or self.is_file_excluded(name))]
 
         self.clear()
+
+    def is_file_excluded(self, filename):
+        for pattern in self.exclude_files:
+            if fnmatch.fnmatch(filename, pattern):
+                return True
+            if fnmatch.fnmatch(os.path.join(self.path, filename), pattern):
+                return True
+        return False
 
     def _python_checksum(self):
         self.checksums = {}
@@ -169,17 +172,23 @@ class Directory(object):
 
 
 class Checker(object):
-    def __init__(self, method='shell'):
+    def __init__(self, method='shell', exclude_files=[]):
         self.cwd = os.getcwd()
         self.method = method
         self.directories = {}
+        self.exclude_files = exclude_files
 
     def process_directory(self, directory, verbose=False):
-        for dirpath, _, filenames in os.walk(directory):
+        for dirpath, dirnames, filenames in os.walk(directory):
+            for pattern in self.exclude_files:
+                dirnames[:] = [name for name in dirnames
+                               if not fnmatch.fnmatch(os.path.join(dirpath, name), pattern)]
             if not filenames:
                 continue
 
-            d = Directory(dirpath, filenames=filenames, method=self.method)
+            d = Directory(dirpath,
+                          method=self.method,
+                          exclude_files=self.exclude_files)
             d.process()
 
             if verbose:
@@ -255,27 +264,36 @@ def main():
         # delete all checksum files
         for directory in args.dirs:
             clean_directory(directory)
-    else:
-        # Calculate checksums and check against previous checksum files
-        checker = Checker(args.method)
-        for directory in args.dirs:
-            checker.process_directory(directory, verbose=args.verbose)
+        sys.exit()
 
-        # Email Result
-        if not args.noemail:
-            report_results(checker)
+    exclude_files = [CHECKSUM_FILENAME]
+    if args.excludefile:
+        with open(args.excludefile) as f:
+            for line in f:
+                exclude_files.append(line)
+    if args.exclude:
+        exclude_files.extend(args.exclude)
 
-        if args.verbose or args.noemail:
-            for item in checker.valid:
-                print('Valid: {}'.format(item))
-            for item in checker.invalid:
-                print('Invalid: {}'.format(item))
-            for item in checker.new:
-                print('New: {}'.format(item))
-            for item in checker.missing:
-                print('Missing: {}'.format(item))
+    # Calculate checksums and check against previous checksum files
+    checker = Checker(args.method, exclude_files)
+    for directory in args.dirs:
+        checker.process_directory(directory, verbose=args.verbose)
 
-    sys.exit(0)
+    # Email Result
+    if not args.noemail:
+        report_results(checker)
+
+    if args.verbose or args.noemail:
+        for item in checker.valid:
+            print('Valid: {}'.format(item))
+        for item in checker.invalid:
+            print('Invalid: {}'.format(item))
+        for item in checker.new:
+            print('New: {}'.format(item))
+        for item in checker.missing:
+            print('Missing: {}'.format(item))
+
+    sys.exit()
 
 
 if __name__ == "__main__":
