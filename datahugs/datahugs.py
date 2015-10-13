@@ -23,13 +23,14 @@ CHECKSUM_FILENAME = 'CHECKSUM'
 
 def parse_args():
     parser = argparse.ArgumentParser(description='Validate your filesystem')
-    parser.add_argument('dirs', metavar="DIRNAME", nargs='+') 
-    parser.add_argument('--verbose', action='store_true', default=False)
-    parser.add_argument('--clean', action='store_true', default=False) 
-    parser.add_argument('--noemail', action='store_true', default=False) 
-    parser.add_argument('--method', choices=('shell','python'), default='shell') 
-    parser.add_argument('--excludefile') 
-    parser.add_argument('--exclude', nargs='*')
+    parser.add_argument('dirs', metavar="DIRNAME", nargs='+', help="Directory (and all subdirectories) to checksum.")
+    parser.add_argument('--verbose', action='store_true', default=False, help="Print progress messages.")
+    parser.add_argument('--clean', action='store_true', default=False, help="Remove all checksum files from directory.")
+    parser.add_argument('--noemail', action='store_true', default=False, help="Don't send an email report on completion.")
+    parser.add_argument('--method', choices=('shell','python'), default='shell', help="'shell' uses cksum to checksum, 'python' is slower.")
+    parser.add_argument('--excludefile', help="Filename containing file/directory patterns to exclude from checksumming.")
+    parser.add_argument('--exclude', nargs='*', help="One or more file/directory patterns to exclude from checksumming.")
+    parser.add_argument('--update', action="store_true", help="Update already present checksum files.")
 
     return parser.parse_args()
 
@@ -40,7 +41,7 @@ def request_email_credentials():
     server = raw_input('Input email server address: ')
     conn = smtplib.SMTP_SSL(server)
     config['server'] = server
-    
+
     username = raw_input('Username: ')
     password = getpass.getpass()
     conn.login(username, password)
@@ -61,7 +62,7 @@ def load_email_credentials():
 
     if not os.path.exists(config_path):
         request_email_credentials()
-    
+
     return json.load(open(config_path, 'r'))
 
 
@@ -84,7 +85,7 @@ class Directory(object):
         self.path = path
         self.checksum_filename = checksum_filename
         self.exclude_files = exclude_files
-        self.filenames = [name for name in os.listdir(path) 
+        self.filenames = [name for name in os.listdir(path)
                           if not (os.path.isdir(os.path.join(path, name))
                                   or self.is_file_excluded(name))]
 
@@ -104,7 +105,7 @@ class Directory(object):
             result = {}
             filesize = os.path.getsize(filename)
             result['size'] = str(filesize)
-            
+
             with open(os.path.join(self.path, filename), 'rb') as f:
                 data = mmap.mmap(f.fileno(), filesize, prot=mmap.PROT_READ)
                 file_crc32 = memcrc.memcrc(data)
@@ -155,12 +156,12 @@ class Directory(object):
     def process(self):
         self.read_checksum_file()
         old_checksums = self.checksums
-        
+
         self.calculate_checksums()
         for filename in old_checksums:
             if filename not in self.checksums:
                 self.missing.append(filename)
-        
+
         for filename, checksums in self.checksums.iteritems():
             if filename in old_checksums:
                 if checksums == old_checksums[filename]:
@@ -178,7 +179,7 @@ class Checker(object):
         self.directories = {}
         self.exclude_files = exclude_files
 
-    def process_directory(self, directory, verbose=False):
+    def process_directory(self, directory, verbose=False, update=False):
         for dirpath, dirnames, filenames in os.walk(directory):
             for pattern in self.exclude_files:
                 dirnames[:] = [name for name in dirnames
@@ -199,7 +200,7 @@ class Checker(object):
                 print('missing: {}'.format(d.missing))
                 print()
 
-            if d.new and not (d.invalid or d.missing):
+            if update and not d.invalid and (d.new or d.missing):
                 d.write_checksum_file()
 
             self.directories[dirpath] = d
@@ -270,14 +271,16 @@ def main():
     if args.excludefile:
         with open(args.excludefile) as f:
             for line in f:
-                exclude_files.append(line)
+                exclude_files.append(line.strip())
     if args.exclude:
         exclude_files.extend(args.exclude)
 
     # Calculate checksums and check against previous checksum files
     checker = Checker(args.method, exclude_files)
     for directory in args.dirs:
-        checker.process_directory(directory, verbose=args.verbose)
+        checker.process_directory(directory,
+                                  verbose=args.verbose,
+                                  update=args.update)
 
     # Email Result
     if not args.noemail:
